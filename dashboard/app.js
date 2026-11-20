@@ -1,10 +1,14 @@
-// Token Radar dashboard, radar-2.
+// Token Radar dashboard, radar-3.
 //
 // Reads window.RADAR (written beside dashboard/ by main.ts) and renders
 // the ranked board as a filterable table, a per-protocol detail view with
 // the model's own inputs and the protocol's farm plan, and a model
 // sandbox that recomputes implied values live. No network: every byte
 // it shows is already in data.js, and the page makes no request at all.
+//
+// The farm plan is not derived here: board.json carries each row's eight
+// steps whole, and the page shows them as written, so the screenshots,
+// the code and the board can never disagree about a plan.
 
 (() => {
   'use strict';
@@ -26,7 +30,7 @@
     sort: 'implied',
     dir: -1,
     selected: null,
-    sandbox: { base: DATA.model.base_multiple, weight: DATA.model.growth_weight },
+    sandbox: { exponent: DATA.model.size_exponent, weight: DATA.model.growth_weight },
   };
   let sandboxOn = false;
 
@@ -51,25 +55,31 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
 
-  // The model in one function, radar-2: the page recomputes a row from
+  // The model in one function, radar-3: the page recomputes a row from
   // the snapshot figures and checks the number board.json carries, so
   // the page's code and the board's data are visibly the same arithmetic.
-  // The sandbox changes only the two constants it shows; the submitted
-  // board is the model as shipped, and a sandbox row is recomputed.
+  // Size is TVL compressed to the 0.75 power, so giants lead but never
+  // win by size alone; the launch multiple (0.05 .. 0.50) is a quality
+  // score from growth, age and breadth. The sandbox changes only the
+  // two constants it shows; the submitted board is the model as shipped,
+  // and a sandbox row is recomputed.
   function impliedOf(row, model) {
+    const eff = Math.pow(row.tvl_usd / model.size_unit, model.size_exponent) * model.size_unit;
     const rawGrowth = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
     const growth = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-    const growthMult = 1 + (growth / 100) * model.growth_weight;
+    const growthNorm = (growth - model.growth_floor) / (model.growth_cap - model.growth_floor);
     const age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-    const maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    const breadth = model.breadth_floor + (Math.min((row.chains || []).length, model.breadth_chains) / model.breadth_chains) * model.breadth_range;
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * breadth));
+    const ageNorm = Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days;
+    const breadthNorm = Math.min((row.chains || []).length, model.breadth_chains) / model.breadth_chains;
+    const quality = model.growth_weight * growthNorm + model.age_weight * ageNorm + model.breadth_weight * breadthNorm;
+    const multiple = model.multiple_floor + model.multiple_range * quality;
+    return Math.max(1, Math.round(eff * multiple));
   }
 
   function modelNow() {
     const m = {};
     for (const k in DATA.model) m[k] = DATA.model[k];
-    m.base_multiple = state.sandbox.base;
+    m.size_exponent = state.sandbox.exponent;
     m.growth_weight = state.sandbox.weight;
     return m;
   }
@@ -104,86 +114,6 @@
       }
     }
     return node;
-  }
-
-  // The farm plan is the same derivation main.ts writes to board.json:
-  // category, chains, TVL and age decide the action, the capital, the
-  // hold and every cost and time. No name is special-cased.
-  function chainOf(p) {
-    return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain';
-  }
-
-  function capitalFor(p) {
-    if (p.tvl_usd >= 5e9) return 250;
-    if (p.tvl_usd >= 1e9) return 150;
-    if (p.tvl_usd >= 1e8) return 100;
-    return 50;
-  }
-
-  function holdDaysFor(age) {
-    if (age === null || age === undefined) return 30;
-    if (age < 180) return 60;
-    if (age < 365) return 45;
-    return 30;
-  }
-
-  function actionFor(p, capital, chain) {
-    const c = (p.category || '').toLowerCase();
-    const name = p.name;
-    if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and keep the position open.';
-    if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return 'Provide $' + capital + ' of liquidity to ' + name + "'s main pool on " + chain + ' and keep the position open.';
-    if (c.includes('bridge')) return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds in its app.';
-    if (c.includes('staking') || c.includes('restak')) return "Stake $" + capital + " of the chain's staking asset through " + name + ' and keep the receipt.';
-    if (c.includes('perpetual') || c.includes('derivative')) return 'Deposit $' + capital + ' of USDC as margin on ' + name + ' and open one small hedge.';
-    if (c.includes('prediction')) return 'Fund $' + capital + ' and place one market position on ' + name + '.';
-    if (c.includes('curator') || c.includes('allocator')) return 'Deposit $' + capital + ' into a ' + name + ' vault on ' + chain + ' and keep the shares.';
-    if (c.includes('stable')) return 'Mint or deposit $' + capital + ' of the stable asset through ' + name + ' on ' + chain + '.';
-    if (c.includes('rwa')) return "Mint $" + capital + " of the protocol's yield asset on " + chain + ' and hold it.';
-    if (c.includes('insurance')) return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy.';
-    if (c.includes('payment')) return 'Pay $' + capital + ' through ' + name + ' on ' + chain + ' and keep the receipt for the farm log.';
-    return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
-  }
-
-  function secondActionFor(p, capital, chain) {
-    const c = (p.category || '').toLowerCase();
-    const name = p.name;
-    if (c.includes('lend') || c.includes('cdp')) return 'Borrow a small amount against the supplied collateral on ' + name + ', then repay it the same week.';
-    if (c.includes('dex') || c.includes('yield')) return 'Swap $' + Math.max(10, Math.round(capital / 5)) + ' of USDC for another asset inside ' + name + ' on ' + chain + '.';
-    if (c.includes('perpetual') || c.includes('derivative')) return 'Close the hedge on ' + name + ' after one week and open a fresh one half the size.';
-    if (c.includes('prediction')) return 'Settle one market on ' + name + ' and open a second one on a different outcome.';
-    if (c.includes('curator') || c.includes('allocator')) return 'Move $' + Math.max(10, Math.round(capital / 2)) + ' into a second ' + name + ' vault on ' + chain + ' to spread the position.';
-    if (c.includes('rwa') || c.includes('stable')) return 'Hold the minted asset for a full week, then check its redemption page before adding more.';
-    return "Vote in " + name + "'s governance or community poll if one is open, or complete one quest the protocol publishes.";
-  }
-
-  function stepText(step) {
-    let s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
-    if (s.length > 600) s = s.slice(0, 596) + '...';
-    if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
-    return s;
-  }
-
-  function farmSteps(p) {
-    const chain = chainOf(p);
-    const capital = capitalFor(p);
-    const hold = holdDaysFor(p.age_days);
-    const steps = [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: secondActionFor(p, capital, chain), cost: 'about $' + (capital >= 150 ? 5 : 2) + ' of gas', time: '10 minutes' },
-    ];
-    if (p.chains && p.chains.length > 1) {
-      steps.push({ text: 'Repeat the same position on ' + p.chains[1] + ' so the farm covers two chains instead of one.', cost: '$' + Math.max(25, Math.round(capital / 2)) + ' of capital and about $3 of gas', time: '15 minutes' });
-    } else {
-      steps.push({ text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' });
-    }
-    steps.push(
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Withdraw a small test amount first, check it arrives in the farm wallet, then unwind the rest.', cost: 'about $2 of gas for the test withdrawal', time: '15 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
-    );
-    return steps.map(stepText);
   }
 
   // The filter state lives in the URL hash, so a filtered view and a
@@ -412,18 +342,23 @@
       class: 'button',
       type: 'button',
       text: 'Reset sandbox',
-      onclick: () => { state.sandbox = { base: DATA.model.base_multiple, weight: DATA.model.growth_weight }; sandboxOn = false; render(); },
+      onclick: () => { state.sandbox = { exponent: DATA.model.size_exponent, weight: DATA.model.growth_weight }; sandboxOn = false; render(); },
     });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x ' + m.base_multiple + ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (' + m.breadth_floor + ' + min(chains, ' + m.breadth_chains + ') / ' + m.breadth_chains + ' x ' + m.breadth_range + ') )'),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Growth is clamped to ' + m.growth_floor + '% .. +' + m.growth_cap + '% because one week can print +4,448% in this snapshot and must never decide the ranking. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Chain breadth is a small tie-breaker. The early radar is every clean pre-token protocol the watchlist leaves out, and the live-token protocols are set aside with their market caps shown.' }),
+        'implied = round( (tvl_usd / 1,000,000) ^ ' + m.size_exponent + ' x 1,000,000 x (' + m.multiple_floor + ' + ' + m.multiple_range + ' x quality) )'),
+      el('div', { class: 'weights' },
+        el('div', null, el('span', { text: 'Size — TVL to the ' + m.size_exponent + ' power' }), el('b', { text: 'compressed' })),
+        el('div', null, el('span', { text: 'Growth — 7-day change, clamped ' + m.growth_floor + '% .. +' + m.growth_cap + '%' }), el('b', { text: 'weight ' + m.growth_weight })),
+        el('div', null, el('span', { text: 'Age — days listed, capped at ' + m.maturity_days + ' days' }), el('b', { text: 'weight ' + m.age_weight })),
+        el('div', null, el('span', { text: 'Breadth — chains, capped at ' + m.breadth_chains }), el('b', { text: 'weight ' + m.breadth_weight }))),
+      el('p', { class: 'sub', text: 'Size is compressed because a token\u2019s value does not grow in step with the value its protocol secures: doubling TVL does not double what a token is worth. The snapshot\u2019s TVL spans about 550x; the 0.75 power compresses that to about 113x, so giants lead but never win by size alone. Growth is clamped because one week can print +4,448% in this snapshot and must never decide the ranking; it carries the largest weight because it says where the TVL is heading. Age is the track record of running with no token, capped at four years, and an unlisted age uses ' + m.unknown_age_days + ' days. Breadth is reach: each chain up to five widens the user base a token could serve. The multiple runs 0.05 .. 0.50 of the compressed size — the radar\u2019s own calibration, never a market fact. The early radar is every clean pre-token protocol the watchlist leaves out, and the live-token protocols are set aside with their market caps shown.' }),
       el('h3', { text: 'Model sandbox — try the constants, the board re-ranks' }),
       el('div', { class: 'sandbox' },
-        slider('sb-base', 'Base multiple', 0.1, 0.4, 0.05, state.sandbox.base, (v) => { state.sandbox.base = v; sandboxOn = true; render(); }),
-        slider('sb-weight', 'Growth weight', 0, 1, 0.1, state.sandbox.weight, (v) => { state.sandbox.weight = v; sandboxOn = true; render(); }),
+        slider('sb-exp', 'Size exponent', 0.5, 1, 0.05, state.sandbox.exponent, (v) => { state.sandbox.exponent = v; sandboxOn = true; render(); }),
+        slider('sb-weight', 'Growth weight', 0, 0.9, 0.05, state.sandbox.weight, (v) => { state.sandbox.weight = v; sandboxOn = true; render(); }),
         el('div', null,
           el('span', { class: 'sub', text: sandboxOn ? 'Sandbox on: values below are recomputed, board.json keeps the shipped model.' : 'Sandbox off: the board shows the shipped model.' }),
           reset)));
@@ -438,11 +373,13 @@
     state.selected = slug;
     writeHash();
     dialog.textContent = '';
-    const steps = farmSteps(row);
+    const steps = row.farm_steps || [];
     const recomputed = impliedOf(row, DATA.model);
-    const checkText = recomputed === row.implied_value_usd
-      ? ', the same number board.json carries.'
-      : ', which differs from the board: the data would be stale.';
+    const checkText = sandboxOn
+      ? ' The sandbox is on, so this number is the sandbox model, not the shipped board.'
+      : recomputed === row.implied_value_usd
+        ? ', the same number board.json carries.'
+        : ', which differs from the board: the data would be stale.';
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + (row.watchlist ? ' · watchlist' : ' · early radar') }),
@@ -453,16 +390,17 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
-        el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Chains' }), el('b', { class: 'num', text: String((row.chains || []).length) })),
-        el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
-        el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
-        el('div', null, el('span', { text: 'Breadth multiplier' }), el('b', { class: 'num', text: String(row.breadth_multiplier) })),
+        el('div', null, el('span', { text: 'Effective TVL (TVL ^ ' + DATA.model.size_exponent + ')' }), el('b', { class: 'num', text: fmtUsd(row.effective_tvl_usd) })),
+        el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) + ' → ' + row.growth_norm.toFixed(3) })),
+        el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) + ' → ' + row.age_norm.toFixed(3) })),
+        el('div', null, el('span', { text: 'Chains' }), el('b', { class: 'num', text: String((row.chains || []).length) + ' → ' + row.breadth_norm.toFixed(3) })),
+        el('div', null, el('span', { text: 'Quality (0.45 growth + 0.35 age + 0.20 breadth)' }), el('b', { class: 'num', text: row.quality.toFixed(3) })),
+        el('div', null, el('span', { text: 'Launch multiple' }), el('b', { class: 'num', text: row.multiple.toFixed(3) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))),
+      el('p', { class: 'sub', text: row.model_breakdown }),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + checkText + ' This is an estimate, not a price. It records no token — the snapshot carries no token for it, which is not proof it has none.' })));
     dialog.appendChild(el('section', { class: 'detail-section' },
-      el('h3', { text: 'Farm plan — 8 steps' }),
+      el('h3', { text: 'Farm plan — ' + steps.length + ' steps' }),
       el('ol', { class: 'steps' }, steps.map((s) => {
         const at = s.indexOf(' Cost: ');
         const action = at >= 0 ? s.slice(0, at) : s;
